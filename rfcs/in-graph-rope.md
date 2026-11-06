@@ -7,7 +7,7 @@ In Transformer attention mechanisms, Rotary Position Embedding (RoPE) is fundame
 Historically, LLM serving engines precompute a large lookup table of shape $[L_{\max}, d_{\text{rot}}]$ and store it in accelerator High Bandwidth Memory (HBM). For modern long-context models ($L_{\max} \ge 128\text{k}$ tokens), this pattern introduces significant operational and architectural pain points:
 - **Wasted Memory**: Multi-gigabyte lookup tables reside permanently in HBM even when serving short requests.
 - **Serving Fragility**: Serving systems must maintain complex table slicing, memory reallocation, padding, speculative decoding boundary protection, and model-specific table patching hacks.
-- **TPU Execution Mismatch**: On TPUs, arithmetic and transcendental operations (evaluating polynomials / CORDIC / exp / sin / cos in vector registers) are orders of magnitude faster and more memory-bandwidth efficient than pulling gigabytes of precomputed tables across the memory bus.
+- **TPU Execution Mismatch**: On TPUs, arithmetic and transcendental operations (evaluating polynomials, `exp`, `sin`, and `cos` in vector registers) are orders of magnitude faster and more memory-bandwidth efficient than pulling gigabytes of precomputed tables across the memory bus.
 
 ### Core Design Principles
 1. **No Precomputed Global Tables in HBM, No Heuristic Content Fallbacks**: The serving engine does not store static tables in device memory, nor does it attempt to guess or reverse-engineer rotation parameters by inspecting table weights.
@@ -35,34 +35,38 @@ To perform planar rotations, we divide the $d$ real elements of $\mathbf{q}$ int
 - **Imaginary component row vector**: $\mathbf{q}_{\text{im}} \in \mathbb{R}^{1 \times (d/2)}$
 
 #### Model-Specific Channel Splitting (`is_neox_style`)
-How a 1D vector $\mathbf{q} = [q_0, q_1, \dots, q_{d-1}]^\top$ is partitioned into $(\mathbf{q}_{\text{re}}, \mathbf{q}_{\text{im}})$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
 
-1. **First-Half / Second-Half Partition (GPT-NeoX Style, `is_neox_style = True`)**:
-   The first $d/2$ elements form the real part, and the second $d/2$ elements form the imaginary part:
+How a 1D vector $\mathbf{q}$ of length $d$ is partitioned into $\mathbf{q}_{\text{re}}$ and $\mathbf{q}_{\text{im}}$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
 
-   ```math
+##### 1. First-Half / Second-Half Partition (GPT-NeoX Style, `is_neox_style = True`)
+
+The first $d/2$ elements form the real part, and the second $d/2$ elements form the imaginary part:
+
+```math
 \begin{aligned}
-   \mathbf{q}_{\text{re}} &= [\, q_0,\; q_1,\; \dots,\; q_{d/2 - 1} \,] \\
-   \mathbf{q}_{\text{im}} &= [\, q_{d/2},\; q_{d/2 + 1},\; \dots,\; q_{d - 1} \,]
-   \end{aligned}
-   \qquad \xrightarrow{d=4} \qquad
-   Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_1 \\ q_2 & q_3 \end{bmatrix}
-
-```
-   *Adopted by*: Llama family, Qwen family, Gemma, Mistral, Phi.
-
-2. **Even / Odd Interleaved Partition (GPT-J / Original RoPE Style, `is_neox_style = False`)**:
-   Even-indexed elements form the real part, and odd-indexed elements form the imaginary part:
-   ```math
-\begin{aligned}
-   \mathbf{q}_{\text{re}} &= [\, q_0,\; q_2,\; \dots,\; q_{d - 2} \,] \\
-   \mathbf{q}_{\text{im}} &= [\, q_1,\; q_3,\; \dots,\; q_{d - 1} \,]
-   \end{aligned}
-   \qquad \xrightarrow{d=4} \qquad
-   Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_2 \\ q_1 & q_3 \end{bmatrix}
+\mathbf{q}_{\text{re}} &= [q_0,\; q_1,\; \dots,\; q_{d/2 - 1}] \\
+\mathbf{q}_{\text{im}} &= [q_{d/2},\; q_{d/2 + 1},\; \dots,\; q_{d - 1}]
+\end{aligned}
+\qquad \xrightarrow{d=4} \qquad
+Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_1 \\ q_2 & q_3 \end{bmatrix}
 ```
 
-   *Adopted by*: GPT-J, DeepSeek MLA (specific kernels), ChatGLM.
+*Adopted by*: Llama family, Qwen family, Gemma, Mistral, Phi.
+
+##### 2. Even / Odd Interleaved Partition (GPT-J / Original RoPE Style, `is_neox_style = False`)
+
+Even-indexed elements form the real part, and odd-indexed elements form the imaginary part:
+
+```math
+\begin{aligned}
+\mathbf{q}_{\text{re}} &= [q_0,\; q_2,\; \dots,\; q_{d - 2}] \\
+\mathbf{q}_{\text{im}} &= [q_1,\; q_3,\; \dots,\; q_{d - 1}]
+\end{aligned}
+\qquad \xrightarrow{d=4} \qquad
+Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_2 \\ q_1 & q_3 \end{bmatrix}
+```
+
+*Adopted by*: GPT-J, DeepSeek MLA (specific kernels), ChatGLM.
 
 Under either partition, $\mathbf{q}$ forms a **$2 \times (d/2)$ real matrix $Q$**, where each column $j \in \{0, 1, \dots, d/2 - 1\}$ represents a point on the complex plane $\mathbb{C}$:
 
@@ -72,7 +76,7 @@ Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatri
 z_j^{(q)} = q_{\text{re}, j} + \mathrm{i}\, q_{\text{im}, j} \in \mathbb{C}, \quad j = 0, 1, \dots, \frac{d}{2} - 1
 ```
 
-*(Note: For Partial RoPE architectures, only the first $d_{\text{rot}}$ elements undergo rotation, while the remaining $d_{\text{head}} - d_{\text{rot}}$ elements pass through unchanged).*
+*(Note: For Partial RoPE architectures, only the first $d_{\text{rot}}$ elements out of $d_{\text{head}}$ undergo rotation, while the remaining unrotated elements pass through unchanged).*
 
 ---
 
@@ -89,11 +93,12 @@ According to Euler's formula, $e^{\mathrm{i}\alpha} = \cos\alpha + \mathrm{i}\si
 Expanding with $\mathrm{i}^2 = -1$ yields the rotated real and imaginary components:
 
 ```math
-\tilde{z}_j^{(q)} = \bigl(q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j)\bigr) + \mathrm{i}\,\bigl(q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)\bigr)
+\begin{aligned}
+\tilde{z}_j^{(q)} &= \bigl(q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j)\bigr) + \mathrm{i}\,\bigl(q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)\bigr) \\[4pt]
+\tilde{q}_{\text{re}, j} &= q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j) \\
+\tilde{q}_{\text{im}, j} &= q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)
+\end{aligned}
 ```
-
-- **Rotated Real Part**: $\tilde{q}_{\text{re}, j} = q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j)$
-- **Rotated Imaginary Part**: $\tilde{q}_{\text{im}, j} = q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)$
 
 ---
 
@@ -101,7 +106,7 @@ Expanding with $\mathrm{i}^2 = -1$ yields the rotated real and imaginary compone
 
 The inner product of two 2D real vectors equals the real part of the product between one complex number and the complex conjugate of the other: $\langle \mathbf{u}, \mathbf{v} \rangle = \operatorname{Re}(u \cdot \overline{v})$.
 
-For query at position $m$ ($z_j^{(q)} e^{\mathrm{i} m\theta_j}$) and key at position $n$ ($z_j^{(k)} e^{\mathrm{i} n\theta_j}$), the complex conjugate of the key is $\overline{z_j^{(k)} e^{\mathrm{i} n\theta_j}} = \overline{z_j^{(k)}} e^{-\mathrm{i} n\theta_j}$. The dot product simplifies in a single step via exponential laws:
+For query at position $m$ ($z_j^{(q)} e^{\mathrm{i} m\theta_j}$) and key at position $n$ ($z_j^{(k)} e^{\mathrm{i} n\theta_j}$), the complex conjugate of the key is $\overline{z_j^{(k)}} e^{-\mathrm{i} n\theta_j}$. The dot product simplifies in a single step via exponential laws:
 
 ```math
 \langle \tilde{\mathbf{q}}_m, \tilde{\mathbf{k}}_n \rangle
@@ -122,12 +127,12 @@ On hardware accelerators (TPU / GPU), we arrange the cosine and sine values for 
 \mathbf{s} = \bigl[\sin(m\theta_0),\; \dots,\; \sin(m\theta_{d/2 - 1})\bigr]
 ```
 
-Applying RoPE to $Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix}$ is expressed purely via element-wise operations ($\odot$):
+Applying RoPE to the matrix $Q$ is expressed purely via element-wise operations ($\odot$):
 
 ```math
 \tilde{Q} = \begin{bmatrix} \tilde{\mathbf{q}}_{\text{re}} \\ \tilde{\mathbf{q}}_{\text{im}} \end{bmatrix}
-= \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{c} \\ \mathbf{c} \end{bmatrix}
-- \begin{bmatrix} -\mathbf{q}_{\text{im}} \\ \mathbf{q}_{\text{re}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{s} \\ \mathbf{s} \end{bmatrix}
+= \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{c} \\ \mathbf{c} \end{bmatrix} +
+\begin{bmatrix} -\mathbf{q}_{\text{im}} \\ \mathbf{q}_{\text{re}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{s} \\ \mathbf{s} \end{bmatrix}
 ```
 
 No dense matrix multiplication is performed; execution consists entirely of fused vector arithmetic.
@@ -136,18 +141,19 @@ No dense matrix multiplication is performed; execution consists entirely of fuse
 
 ## 3. Mathematical Taxonomy of RoPE Variants in vLLM
 
-Standard RoPE defines base frequencies $\boldsymbol{\theta} = (\theta_0, \dots, \theta_{d_{\text{rot}}/2 - 1})$ as a geometric progression:
+Standard RoPE defines base frequencies as a geometric progression across the $d_{\text{rot}}/2$ channels:
 
 ```math
 \theta_i = b^{-\frac{2i}{d_{\text{rot}}}} = \frac{1}{b^{2i / d_{\text{rot}}}}, \quad i = 0, 1, \dots, \frac{d_{\text{rot}}}{2} - 1
 ```
 
-where $b = \text{rope\_theta}$ (typically $10000$ to $500000$).
+where $b$ is `rope_theta` (typically $10000$ to $500000$).
 
 ### Physical Meaning of Index $i$: Multi-Scale Clock Mechanism
+
 The channel index $i \in \{0, 1, \dots, d_{\text{rot}}/2 - 1\}$ indexes the frequency spectrum:
 - **$i = 0$ (Fast Channel / "Second Hand")**: $\theta_0 = 1$. The phase rotates rapidly from token to token, producing large phase differences between adjacent tokens to resolve **local word order and syntactic structures**.
-- **$i \to d_{\text{rot}}/2 - 1$ (Slow Channel / "Hour Hand")**: $\theta_{d/2-1} = 1/b \ll 1$. The phase rotates minimally even across thousands of tokens, preventing cycle aliasing to measure **global semantic distance across long contexts**.
+- **$i \to d_{\text{rot}}/2 - 1$ (Slow Channel / "Hour Hand")**: $\theta_i \approx 1/b \ll 1$. The phase rotates minimally even across thousands of tokens, preventing cycle aliasing to measure **global semantic distance across long contexts**.
 
 All vLLM RoPE implementations modify one of four fundamental components:
 1. **Frequency Formula $\theta_i$** (Frequency scaling variants)
@@ -168,6 +174,7 @@ These variants compute a static scaled frequency vector $\boldsymbol{\theta}^* \
 ```
 
 #### 2. Linear Position Scaling (`rope_type = "linear"`)
+
 Given context extension factor $c = \text{factor}$:
 
 ```math
@@ -175,20 +182,25 @@ Given context extension factor $c = \text{factor}$:
 ```
 
 #### 3. NTK-Aware Scaling (`rope_type = "ntk"`)
-Scales low frequencies (long range) while preserving high frequencies (local precision):
-- **Fixed NTK**:
 
-  ```math
+Scales low frequencies (long range) while preserving high frequencies (local precision).
+
+##### Fixed NTK
+
+```math
 \theta_i^* = \theta_i \cdot c^{-\frac{2(i + 1)}{d_{\text{rot}}}}
-
 ```
-  For $i=0$, the scale factor is $c^{-2/d_{\text{rot}}} \approx 1$ (unscaled high frequency). For $i=d_{\text{rot}}/2-1$, the scale factor is $c^{-1} = 1/c$ (fully interpolated low frequency).
-- **Mixed NTK** (with parameter $\beta = \text{mixed\_b}$):
-  ```math
+
+For $i=0$, the scale factor is $c^{-2/d_{\text{rot}}} \approx 1$ (unscaled high frequency). For $i=d_{\text{rot}}/2-1$, the scale factor is $c^{-1} = 1/c$ (fully interpolated low frequency).
+
+##### Mixed NTK (with parameter $\beta = \text{mixed\_b}$)
+
+```math
 \theta_i^* = \frac{\theta_i}{\exp\!\left( \frac{\ln c}{(d_{\text{rot}}/2)^\beta} \cdot (i + 1)^\beta \right)}
 ```
 
 #### 4. Dynamic NTK (`rope_type = "dynamic"`)
+
 Adjusts the base dynamically based on sequence length:
 
 ```math
@@ -196,6 +208,7 @@ b' = b \cdot \left( \frac{c \cdot L_{\max}}{L_{\text{train}}} - (c - 1) \right)^
 ```
 
 #### 5. Llama-3 Piecewise Smoothing (`rope_type = "llama3"`)
+
 Given low-frequency factor $f_{\text{low}}$ and high-frequency factor $f_{\text{high}}$:
 
 ```math
@@ -207,7 +220,8 @@ Given low-frequency factor $f_{\text{low}}$ and high-frequency factor $f_{\text{
 ```
 
 #### 6. Gemma-4 Proportional Scaling (`rope_type = "proportional"`)
-Uses full $d_{\text{head}}$ in exponent for the active $d_{\text{rot}}$ dimensions and sets remaining frequencies to zero:
+
+Uses full $d_{\text{head}}$ in the exponent for the active $d_{\text{rot}}$ dimensions and sets remaining frequencies to zero:
 
 ```math
 \theta_i^* = \begin{cases}
@@ -227,6 +241,7 @@ These variants scale the rotated vector by a temperature or entropy-compensating
 ```
 
 #### 1. YaRN (`rope_type = "yarn"`)
+
 Blends frequency interpolation via smooth ramp $\gamma_i$ and applies temperature scaling:
 
 ```math
@@ -234,6 +249,7 @@ s = \sqrt{\frac{1}{t}}, \quad t = 0.1 \ln(c) + 1
 ```
 
 #### 2. DeepSeek YaRN (`rope_type = "deepseek_yarn"`)
+
 Extends YaRN with decoupled scalar temperature compensation:
 
 ```math
@@ -245,6 +261,7 @@ s = m_{\text{scale}} \cdot m_{\text{scale\_all\_dim}} = \left(0.1 \ln(c) + 1\rig
 ### 3.3 Category 3: Dynamic Piecewise & Causal Phase Variants
 
 #### 1. Phi-3 LongRoPE (`rope_type = "longrope"`)
+
 Applies non-uniform per-channel scale factors from pre-trained calibration:
 
 ```math
@@ -255,11 +272,13 @@ Applies non-uniform per-channel scale factors from pre-trained calibration:
 ```
 
 #### 2. DeepSeek-V4 Dual-Chunk RoPE (`rope_type = "dual_chunk"`)
+
 Divides long context into chunks of size $C$. Token position $p = u \cdot C + v$ (chunk index $u = \lfloor p/C \rfloor$, local offset $v = p \pmod C$):
 - First $d_1$ dimensions encode intra-chunk relative position $v$;
 - Next $d_2$ dimensions encode inter-chunk coarse position $u$.
 
 #### 3. FoPE (Forward-only Phase RoPE, `rope_type = "fope"`)
+
 Replaces periodic rotations with monotonic forward-only relative phase clamping:
 
 ```math
@@ -336,6 +355,6 @@ Each evaluator function:
 
 ## 5. Verification Plan
 
-1. **Numerical Parity**: Validate maximum absolute difference $| \cos_{\text{hlo}} - \cos_{\text{table}} | < 10^{-5}$ across float32 and bfloat16 for all supported variants over position range $p \in [0, 131072]$.
+1. **Numerical Parity**: Validate maximum absolute difference $|\cos_{\text{hlo}}(p) - \cos_{\text{table}}(p)| < 10^{-5}$ across float32 and bfloat16 for all supported variants over position range $p \in [0, 131072]$.
 2. **End-to-End Correctness**: Verify perplexity and greedy generation matching across Llama-3.1-8B, Qwen2.5-7B, DeepSeek-V3/V4, and Qwen2-VL-7B.
 3. **Compilation Stability**: Verify StableHLO graph caching with static shapes under dynamic padding regimes.
