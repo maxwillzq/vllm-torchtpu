@@ -1,4 +1,4 @@
-# RFC 0001: Compute RoPE In-Graph by Default (`rope_config -> HLO Graph Function`)
+# RFC: Compute RoPE In-Graph by Default (`rope_config -> HLO Graph Function`)
 
 ## 1. Summary & Motivation
 
@@ -39,35 +39,38 @@ How a 1D vector $\mathbf{q} = [q_0, q_1, \dots, q_{d-1}]^\top$ is partitioned in
 
 1. **First-Half / Second-Half Partition (GPT-NeoX Style, `is_neox_style = True`)**:
    The first $d/2$ elements form the real part, and the second $d/2$ elements form the imaginary part:
-   $$
-   \begin{aligned}
+
+   ```math
+\begin{aligned}
    \mathbf{q}_{\text{re}} &= [\, q_0,\; q_1,\; \dots,\; q_{d/2 - 1} \,] \\
    \mathbf{q}_{\text{im}} &= [\, q_{d/2},\; q_{d/2 + 1},\; \dots,\; q_{d - 1} \,]
    \end{aligned}
    \qquad \xrightarrow{d=4} \qquad
    Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_1 \\ q_2 & q_3 \end{bmatrix}
-   $$
+
+```
    *Adopted by*: Llama family, Qwen family, Gemma, Mistral, Phi.
 
 2. **Even / Odd Interleaved Partition (GPT-J / Original RoPE Style, `is_neox_style = False`)**:
    Even-indexed elements form the real part, and odd-indexed elements form the imaginary part:
-   $$
-   \begin{aligned}
+   ```math
+\begin{aligned}
    \mathbf{q}_{\text{re}} &= [\, q_0,\; q_2,\; \dots,\; q_{d - 2} \,] \\
    \mathbf{q}_{\text{im}} &= [\, q_1,\; q_3,\; \dots,\; q_{d - 1} \,]
    \end{aligned}
    \qquad \xrightarrow{d=4} \qquad
    Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} = \begin{bmatrix} q_0 & q_2 \\ q_1 & q_3 \end{bmatrix}
-   $$
+```
+
    *Adopted by*: GPT-J, DeepSeek MLA (specific kernels), ChatGLM.
 
 Under either partition, $\mathbf{q}$ forms a **$2 \times (d/2)$ real matrix $Q$**, where each column $j \in \{0, 1, \dots, d/2 - 1\}$ represents a point on the complex plane $\mathbb{C}$:
 
-$$
+```math
 Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} \in \mathbb{R}^{2 \times (d/2)}
 \quad \Longleftrightarrow \quad
 z_j^{(q)} = q_{\text{re}, j} + \mathrm{i}\, q_{\text{im}, j} \in \mathbb{C}, \quad j = 0, 1, \dots, \frac{d}{2} - 1
-$$
+```
 
 *(Note: For Partial RoPE architectures, only the first $d_{\text{rot}}$ elements undergo rotation, while the remaining $d_{\text{head}} - d_{\text{rot}}$ elements pass through unchanged).*
 
@@ -79,15 +82,15 @@ $$
 
 According to Euler's formula, $e^{\mathrm{i}\alpha} = \cos\alpha + \mathrm{i}\sin\alpha$. Rotating a complex number $z_j^{(q)} = r e^{\mathrm{i}\alpha}$ counterclockwise by an angle $m\theta_j$ (where $m$ is the token position and $\theta_j$ is the angular frequency of channel $j$) is achieved by multiplying by the unit complex exponential $e^{\mathrm{i} m\theta_j}$:
 
-$$
+```math
 \tilde{z}_j^{(q)} = z_j^{(q)} \cdot e^{\mathrm{i} m\theta_j} = (q_{\text{re}, j} + \mathrm{i}\, q_{\text{im}, j})\bigl(\cos(m\theta_j) + \mathrm{i}\sin(m\theta_j)\bigr)
-$$
+```
 
 Expanding with $\mathrm{i}^2 = -1$ yields the rotated real and imaginary components:
 
-$$
+```math
 \tilde{z}_j^{(q)} = \bigl(q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j)\bigr) + \mathrm{i}\,\bigl(q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)\bigr)
-$$
+```
 
 - **Rotated Real Part**: $\tilde{q}_{\text{re}, j} = q_{\text{re}, j}\cos(m\theta_j) - q_{\text{im}, j}\sin(m\theta_j)$
 - **Rotated Imaginary Part**: $\tilde{q}_{\text{im}, j} = q_{\text{im}, j}\cos(m\theta_j) + q_{\text{re}, j}\sin(m\theta_j)$
@@ -100,11 +103,11 @@ The inner product of two 2D real vectors equals the real part of the product bet
 
 For query at position $m$ ($z_j^{(q)} e^{\mathrm{i} m\theta_j}$) and key at position $n$ ($z_j^{(k)} e^{\mathrm{i} n\theta_j}$), the complex conjugate of the key is $\overline{z_j^{(k)} e^{\mathrm{i} n\theta_j}} = \overline{z_j^{(k)}} e^{-\mathrm{i} n\theta_j}$. The dot product simplifies in a single step via exponential laws:
 
-$$
+```math
 \langle \tilde{\mathbf{q}}_m, \tilde{\mathbf{k}}_n \rangle
 = \sum_{j=0}^{d/2 - 1} \operatorname{Re}\!\left( \bigl(z_j^{(q)} e^{\mathrm{i} m\theta_j}\bigr) \cdot \overline{\bigl(z_j^{(k)} e^{\mathrm{i} n\theta_j}\bigr)} \right)
 = \sum_{j=0}^{d/2 - 1} \operatorname{Re}\!\left( z_j^{(q)} \overline{z_j^{(k)}} \, e^{\mathrm{i}(m - n)\theta_j} \right)
-$$
+```
 
 The absolute positions $m$ and $n$ cancel out, proving that attention logits depend strictly on the **relative distance $m - n$**.
 
@@ -114,18 +117,18 @@ The absolute positions $m$ and $n$ cancel out, proving that attention logits dep
 
 On hardware accelerators (TPU / GPU), we arrange the cosine and sine values for position $m$ into row vectors of length $d/2$:
 
-$$
+```math
 \mathbf{c} = \bigl[\cos(m\theta_0),\; \dots,\; \cos(m\theta_{d/2 - 1})\bigr], \quad
 \mathbf{s} = \bigl[\sin(m\theta_0),\; \dots,\; \sin(m\theta_{d/2 - 1})\bigr]
-$$
+```
 
 Applying RoPE to $Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix}$ is expressed purely via element-wise operations ($\odot$):
 
-$$
+```math
 \tilde{Q} = \begin{bmatrix} \tilde{\mathbf{q}}_{\text{re}} \\ \tilde{\mathbf{q}}_{\text{im}} \end{bmatrix}
 = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{c} \\ \mathbf{c} \end{bmatrix}
 - \begin{bmatrix} -\mathbf{q}_{\text{im}} \\ \mathbf{q}_{\text{re}} \end{bmatrix} \odot \begin{bmatrix} \mathbf{s} \\ \mathbf{s} \end{bmatrix}
-$$
+```
 
 No dense matrix multiplication is performed; execution consists entirely of fused vector arithmetic.
 
@@ -135,9 +138,9 @@ No dense matrix multiplication is performed; execution consists entirely of fuse
 
 Standard RoPE defines base frequencies $\boldsymbol{\theta} = (\theta_0, \dots, \theta_{d_{\text{rot}}/2 - 1})$ as a geometric progression:
 
-$$
+```math
 \theta_i = b^{-\frac{2i}{d_{\text{rot}}}} = \frac{1}{b^{2i / d_{\text{rot}}}}, \quad i = 0, 1, \dots, \frac{d_{\text{rot}}}{2} - 1
-$$
+```
 
 where $b = \text{rope\_theta}$ (typically $10000$ to $500000$).
 
@@ -159,73 +162,83 @@ All vLLM RoPE implementations modify one of four fundamental components:
 These variants compute a static scaled frequency vector $\boldsymbol{\theta}^* \in \mathbb{R}^{d_{\text{rot}}/2}$ from `rope_config`:
 
 #### 1. Default RoPE (`rope_type = "default"`)
-$$
+
+```math
 \theta_i^* = b^{-\frac{2i}{d_{\text{rot}}}}
-$$
+```
 
 #### 2. Linear Position Scaling (`rope_type = "linear"`)
 Given context extension factor $c = \text{factor}$:
-$$
+
+```math
 \theta_i^* = \frac{b^{-2i / d_{\text{rot}}}}{c} = \frac{\theta_i}{c}
-$$
+```
 
 #### 3. NTK-Aware Scaling (`rope_type = "ntk"`)
 Scales low frequencies (long range) while preserving high frequencies (local precision):
 - **Fixed NTK**:
-  $$
-  \theta_i^* = \theta_i \cdot c^{-\frac{2(i + 1)}{d_{\text{rot}}}}
-  $$
+
+  ```math
+\theta_i^* = \theta_i \cdot c^{-\frac{2(i + 1)}{d_{\text{rot}}}}
+
+```
   For $i=0$, the scale factor is $c^{-2/d_{\text{rot}}} \approx 1$ (unscaled high frequency). For $i=d_{\text{rot}}/2-1$, the scale factor is $c^{-1} = 1/c$ (fully interpolated low frequency).
 - **Mixed NTK** (with parameter $\beta = \text{mixed\_b}$):
-  $$
-  \theta_i^* = \frac{\theta_i}{\exp\!\left( \frac{\ln c}{(d_{\text{rot}}/2)^\beta} \cdot (i + 1)^\beta \right)}
-  $$
+  ```math
+\theta_i^* = \frac{\theta_i}{\exp\!\left( \frac{\ln c}{(d_{\text{rot}}/2)^\beta} \cdot (i + 1)^\beta \right)}
+```
 
 #### 4. Dynamic NTK (`rope_type = "dynamic"`)
 Adjusts the base dynamically based on sequence length:
-$$
+
+```math
 b' = b \cdot \left( \frac{c \cdot L_{\max}}{L_{\text{train}}} - (c - 1) \right)^{\frac{d_{\text{rot}}}{d_{\text{rot}} - 2}}, \quad \theta_i^* = (b')^{-\frac{2i}{d_{\text{rot}}}}
-$$
+```
 
 #### 5. Llama-3 Piecewise Smoothing (`rope_type = "llama3"`)
 Given low-frequency factor $f_{\text{low}}$ and high-frequency factor $f_{\text{high}}$:
-$$
+
+```math
 \theta_i^* = \begin{cases}
 \theta_i, & \lambda_i < \frac{L_{\text{orig}}}{f_{\text{high}}} \text{ (high-frequency: no scaling)} \\[6pt]
 \dfrac{\theta_i}{c}, & \lambda_i > \frac{L_{\text{orig}}}{f_{\text{low}}} \text{ (low-frequency: linear scaling)} \\[8pt]
 (1 - \gamma_i)\dfrac{\theta_i}{c} + \gamma_i \theta_i, & \text{transitional zone, where } \gamma_i = \dfrac{L_{\text{orig}}/\lambda_i - f_{\text{low}}}{f_{\text{high}} - f_{\text{low}}}
 \end{cases}
-$$
+```
 
 #### 6. Gemma-4 Proportional Scaling (`rope_type = "proportional"`)
 Uses full $d_{\text{head}}$ in exponent for the active $d_{\text{rot}}$ dimensions and sets remaining frequencies to zero:
-$$
+
+```math
 \theta_i^* = \begin{cases}
 b^{-\frac{2i}{d_{\text{head}}}}, & 0 \le i < \dfrac{d_{\text{rot}}}{2} \\[6pt]
 0, & \dfrac{d_{\text{rot}}}{2} \le i < \dfrac{d_{\text{head}}}{2}
 \end{cases}
-$$
+```
 
 ---
 
 ### 3.2 Category 2: Magnitude Scaling Variants
 
 These variants scale the rotated vector by a temperature or entropy-compensating factor $s$:
-$$
+
+```math
 \tilde{Q} = s \cdot \left( Q \odot C + Q_{\text{swap}} \odot S \right)
-$$
+```
 
 #### 1. YaRN (`rope_type = "yarn"`)
 Blends frequency interpolation via smooth ramp $\gamma_i$ and applies temperature scaling:
-$$
+
+```math
 s = \sqrt{\frac{1}{t}}, \quad t = 0.1 \ln(c) + 1
-$$
+```
 
 #### 2. DeepSeek YaRN (`rope_type = "deepseek_yarn"`)
 Extends YaRN with decoupled scalar temperature compensation:
-$$
+
+```math
 s = m_{\text{scale}} \cdot m_{\text{scale\_all\_dim}} = \left(0.1 \ln(c) + 1\right) \cdot \text{scale\_factor}
-$$
+```
 
 ---
 
@@ -233,12 +246,13 @@ $$
 
 #### 1. Phi-3 LongRoPE (`rope_type = "longrope"`)
 Applies non-uniform per-channel scale factors from pre-trained calibration:
-$$
+
+```math
 \theta_i^*(p) = \begin{cases}
 \dfrac{\theta_i}{\text{short\_factors}_i}, & p \le L_{\text{orig}} \\[6pt]
 \dfrac{\theta_i}{\text{long\_factors}_i}, & p > L_{\text{orig}}
 \end{cases}
-$$
+```
 
 #### 2. DeepSeek-V4 Dual-Chunk RoPE (`rope_type = "dual_chunk"`)
 Divides long context into chunks of size $C$. Token position $p = u \cdot C + v$ (chunk index $u = \lfloor p/C \rfloor$, local offset $v = p \pmod C$):
@@ -247,9 +261,10 @@ Divides long context into chunks of size $C$. Token position $p = u \cdot C + v$
 
 #### 3. FoPE (Forward-only Phase RoPE, `rope_type = "fope"`)
 Replaces periodic rotations with monotonic forward-only relative phase clamping:
-$$
+
+```math
 \Delta\theta_{\text{eff}}(m, n) = \max(0, m - n) \cdot \theta_i^*
-$$
+```
 
 ---
 
@@ -258,17 +273,20 @@ $$
 For multimodal and spatial-temporal models (Qwen2-VL, M-Llama4), position is a 3D tuple $(t, h, w)$ rather than a 1D scalar $p$.
 
 The $d_{\text{rot}}/2$ frequency channels are partitioned into three disjoint sections:
-$$
+
+```math
 \frac{d_{\text{rot}}}{2} = D_t + D_h + D_w
-$$
+```
+
 For token with coordinate $(t, h, w)$:
-$$
+
+```math
 \theta_i^{\text{coord}} = \begin{cases}
 t \cdot \theta_i^*, & 0 \le i < D_t \text{ (temporal/frame axis)} \\
 h \cdot \theta_i^*, & D_t \le i < D_t + D_h \text{ (height/row axis)} \\
 w \cdot \theta_i^*, & D_t + D_h \le i < \dfrac{d_{\text{rot}}}{2} \text{ (width/column axis)}
 \end{cases}
-$$
+```
 
 ---
 
