@@ -36,7 +36,7 @@ To perform planar rotations, we divide the $d$ real elements of $\mathbf{q}$ int
 
 #### Model-Specific Channel Splitting (`is_neox_style`)
 
-How a 1D vector $\mathbf{q}$ of length $d$ is partitioned into $\mathbf{q} _{\text{re}}$ and $\mathbf{q}_ {\text{im}}$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
+How a 1D vector $\mathbf{q}$ of length $d$ is partitioned into $\mathbf q_{\text{re}}$ and $\mathbf q_{\text{im}}$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
 
 ##### 1. First-Half / Second-Half Partition (GPT-NeoX Style, `is_neox_style = True`)
 
