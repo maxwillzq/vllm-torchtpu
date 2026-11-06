@@ -104,14 +104,14 @@ Expanding with $\mathrm{i}^2 = -1$ yields the rotated real and imaginary compone
 
 ### 2.3 One-Line Proof of Relative Position Dependency
 
-The inner product of two 2D real vectors equals the real part of the product between one complex number and the complex conjugate of the other: $\langle \mathbf{u}, \mathbf{v} \rangle = \operatorname{Re}(u \cdot \overline{v})$.
+The inner product of two 2D real vectors equals the real part of the product between one complex number and the complex conjugate of the other: $\langle \mathbf{u}, \mathbf{v} \rangle = \mathrm{Re}(u \cdot \overline{v})$.
 
 For query at position $m$ ($z_j^{(q)} e^{\mathrm{i} m\theta_j}$) and key at position $n$ ($z_j^{(k)} e^{\mathrm{i} n\theta_j}$), the complex conjugate of the key is $\overline{z_j^{(k)}} e^{-\mathrm{i} n\theta_j}$. The dot product simplifies in a single step via exponential laws:
 
 ```math
 \langle \tilde{\mathbf{q}}_m, \tilde{\mathbf{k}}_n \rangle
-= \sum_{j=0}^{d/2 - 1} \operatorname{Re}\!\left( \bigl(z_j^{(q)} e^{\mathrm{i} m\theta_j}\bigr) \cdot \overline{\bigl(z_j^{(k)} e^{\mathrm{i} n\theta_j}\bigr)} \right)
-= \sum_{j=0}^{d/2 - 1} \operatorname{Re}\!\left( z_j^{(q)} \overline{z_j^{(k)}} \, e^{\mathrm{i}(m - n)\theta_j} \right)
+= \sum_{j=0}^{d/2 - 1} \mathrm{Re}\!\left( \bigl(z_j^{(q)} e^{\mathrm{i} m\theta_j}\bigr) \cdot \overline{\bigl(z_j^{(k)} e^{\mathrm{i} n\theta_j}\bigr)} \right)
+= \sum_{j=0}^{d/2 - 1} \mathrm{Re}\!\left( z_j^{(q)} \overline{z_j^{(k)}} \, e^{\mathrm{i}(m - n)\theta_j} \right)
 ```
 
 The absolute positions $m$ and $n$ cancel out, proving that attention logits depend strictly on the **relative distance $m - n$**.
