@@ -36,7 +36,7 @@ To perform planar rotations, we divide the $d$ real elements of $\mathbf{q}$ int
 
 #### Model-Specific Channel Splitting (`is_neox_style`)
 
-How a 1D vector $\mathbf{q}$ of length $d$ is partitioned into $\mathbf{q}\sb{\text{re}}$ and $\mathbf{q}\sb{\text{im}}$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
+How a 1D vector $\mathbf{q}$ of length $d$ is partitioned into $\mathbf{q} _{\text{re}}$ and $\mathbf{q}_ {\text{im}}$ is determined by the model architecture (configured via `is_neox_style`). **Regardless of which partition convention is chosen, all subsequent mathematical rotation and dot-product formulas remain identical:**
 
 ##### 1. First-Half / Second-Half Partition (GPT-NeoX Style, `is_neox_style = True`)
 
@@ -76,7 +76,7 @@ Q = \begin{bmatrix} \mathbf{q}_{\text{re}} \\ \mathbf{q}_{\text{im}} \end{bmatri
 z_j^{(q)} = q_{\text{re}, j} + \mathrm{i}\, q_{\text{im}, j} \in \mathbb{C}, \quad j = 0, 1, \dots, \frac{d}{2} - 1
 ```
 
-> **Note**: For Partial RoPE architectures, only the first $d\sb{\text{rot}}$ elements out of $d\sb{\text{head}}$ undergo rotation, while the remaining unrotated elements pass through unchanged.
+> **Note**: For Partial RoPE architectures, only the first $d_{\text{rot}}$ elements out of $d_{\text{head}}$ undergo rotation, while the remaining unrotated elements pass through unchanged.
 
 ---
 
@@ -193,7 +193,7 @@ Scales low frequencies (long range) while preserving high frequencies (local pre
 
 For $i=0$, the scale factor is $c^{-2/d_{\text{rot}}} \approx 1$ (unscaled high frequency). For $i=d_{\text{rot}}/2-1$, the scale factor is $c^{-1} = 1/c$ (fully interpolated low frequency).
 
-##### Mixed NTK (with parameter $\beta = \text{mixed\_b}$)
+##### Mixed NTK (with parameter $\beta$, i.e. `mixed_b`)
 
 ```math
 \theta_i^* = \frac{\theta_i}{\exp\!\left( \frac{\ln c}{(d_{\text{rot}}/2)^\beta} \cdot (i + 1)^\beta \right)}
